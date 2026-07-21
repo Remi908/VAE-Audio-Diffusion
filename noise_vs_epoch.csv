@@ -1,0 +1,8 @@
+epoch,actual_noise_rms,pred_noise_rms,noise_mse,ckpt_path
+624,0.9994224309921265,0.5632824301719666,0.5994206666946411,/data/VAE/HarmonAI/sample-generator-main-1/vae-model-checkpoints/epoch=624-step=5000.ckpt
+1249,1.0001293420791626,0.569968044757843,0.5697851181030273,/data/VAE/HarmonAI/sample-generator-main-1/vae-model-checkpoints/epoch=1249-step=10000.ckpt
+1874,0.9999244809150696,0.6171004176139832,0.5455690622329712,/data/VAE/HarmonAI/sample-generator-main-1/vae-model-checkpoints/epoch=1874-step=15000.ckpt
+2499,0.9997004866600037,0.6379440426826477,0.5225662589073181,/data/VAE/HarmonAI/sample-generator-main-1/vae-model-checkpoints/epoch=2499-step=20000.ckpt
+3124,0.9999289512634277,0.6416803598403931,0.5050241947174072,/data/VAE/HarmonAI/sample-generator-main-1/vae-model-checkpoints/epoch=3124-step=25000.ckpt
+3749,1.00005042552948,0.6434888243675232,0.5040135979652405,/data/VAE/HarmonAI/sample-generator-main-1/vae-model-checkpoints/epoch=3749-step=30000.ckpt
+4374,1.0001511573791504,0.6514977812767029,0.4843854606151581,/data/VAE/HarmonAI/sample-generator-main-1/vae-model-checkpoints/epoch=4374-step=35000.ckpt

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from dataset.tempo_features import make_tempo_condition
 from audio_diffusion.vae1d import AudioVAE1D
 from prefigure.prefigure import get_all_args, push_wandb_config
 from contextlib import contextmanager
@@ -42,46 +43,82 @@ def alpha_sigma_to_t(alpha, sigma):
     return torch.atan2(sigma, alpha) / math.pi * 2
 
 @torch.no_grad()
-def sample(model, x, steps, eta):
-    """Draws samples from a model given starting noise."""
+def sample(
+    model,
+    x,
+    steps,
+    eta,
+    cond=None,
+    guidance_scale=1.0,
+):
+    """
+    Draw samples from a model given starting noise.
+
+    cond shape:
+        [B, condition_channels, latent_time]
+    """
     ts = x.new_ones([x.shape[0]])
 
-    # Create the noise schedule
-    t = torch.linspace(1, 0, steps + 1)[:-1]
+    t = torch.linspace(
+        1,
+        0,
+        steps + 1,
+        device=x.device,
+    )[:-1]
 
     t = get_crash_schedule(t)
 
     alphas, sigmas = get_alphas_sigmas(t)
 
-    # The sampling loop
     for i in trange(steps):
+        current_t = ts * t[i]
 
-        # Get the model output (v, the predicted velocity)
         with torch.cuda.amp.autocast():
-            v = model(x, ts * t[i]).float()
+            if cond is not None and guidance_scale != 1.0:
+                v_uncond = model(
+                    x,
+                    current_t,
+                    cond=torch.zeros_like(cond),
+                ).float()
 
-        # Predict the noise and the denoised image
+                v_cond = model(
+                    x,
+                    current_t,
+                    cond=cond,
+                ).float()
+
+                v = v_uncond + guidance_scale * (v_cond - v_uncond)
+
+            else:
+                v = model(
+                    x,
+                    current_t,
+                    cond=cond,
+                ).float()
+
         pred = x * alphas[i] - v * sigmas[i]
         eps = x * sigmas[i] + v * alphas[i]
 
-        # If we are not on the last timestep, compute the noisy image for the
-        # next timestep.
         if i < steps - 1:
-            # If eta > 0, adjust the scaling factor for the predicted noise
-            # downward according to the amount of additional noise to add
-            ddim_sigma = eta * (sigmas[i + 1]**2 / sigmas[i]**2).sqrt() * \
-                (1 - alphas[i]**2 / alphas[i + 1]**2).sqrt()
-            adjusted_sigma = (sigmas[i + 1]**2 - ddim_sigma**2).sqrt()
+            ddim_sigma = (
+                eta
+                * (sigmas[i + 1] ** 2 / sigmas[i] ** 2).sqrt()
+                * (1 - alphas[i] ** 2 / alphas[i + 1] ** 2).sqrt()
+            )
 
-            # Recombine the predicted noise and predicted denoised image in the
-            # correct proportions for the next step
-            x = pred * alphas[i + 1] + eps * adjusted_sigma
+            adjusted_sigma = (
+                sigmas[i + 1] ** 2
+                - ddim_sigma ** 2
+            ).sqrt()
 
-            # Add the correct amount of fresh noise
+            x = (
+                pred * alphas[i + 1]
+                + eps * adjusted_sigma
+            )
+
             if eta:
                 x += torch.randn_like(x) * ddim_sigma
 
-    # If we are on the last timestep, output the denoised image
     return pred
 
 
@@ -152,29 +189,16 @@ class DiffusionUncond(pl.LightningModule):
   
     def training_step(self, batch, batch_idx):
         reals = batch[0]
+
+        tempo_vec = None
+
+        if getattr(self.global_args, "use_tempo_conditioning", False):
+            tempo_vec = batch[1].to(self.device)  # [B, 1]
+
         with torch.no_grad():
             mu, logvar = self.vae.encode(reals)
             latents = mu
 
-        # Draw uniformly distributed continuous timesteps
-        # t = self.rng.draw(reals.shape[0])[:, 0].to(self.device)
-
-        # t = get_crash_schedule(t)
-
-        # # Calculate the noise schedule parameters for those timesteps
-        # alphas, sigmas = get_alphas_sigmas(t)
-
-        # # Combine the ground truth images and the noise
-        # alphas = alphas[:, None, None]
-        # sigmas = sigmas[:, None, None]
-        # noise = torch.randn_like(reals)
-        # noised_reals = reals * alphas + noise * sigmas
-        # targets = noise * alphas - reals * sigmas
-
-        # with torch.cuda.amp.autocast():
-        #     v = self.diffusion(noised_reals, t)
-        #     mse_loss = F.mse_loss(v, targets)
-        #     loss = mse_loss
         t = self.rng.draw(latents.shape[0])[:, 0].to(self.device)
         t = get_crash_schedule(t)
 
@@ -185,20 +209,68 @@ class DiffusionUncond(pl.LightningModule):
 
         noise = torch.randn_like(latents)
 
-        noised_latents = latents * alphas + noise * sigmas
-        targets = noise * alphas - latents * sigmas
+        noised_latents = (
+        latents * alphas
+        + noise * sigmas
+       )
+
+        targets = (
+        noise * alphas
+        - latents * sigmas
+        )
+
+        tempo_cond = None
+
+        if tempo_vec is not None:
+            drop_prob = getattr(
+            self.global_args,
+            "cond_drop_prob",
+            0.1,
+        )
+
+            if drop_prob > 0:
+                keep_mask = (
+                    torch.rand(
+                        tempo_vec.shape[0],
+                        1,
+                        device=self.device,
+                )
+                    > drop_prob
+                    ).float()
+
+                tempo_vec = tempo_vec * keep_mask
+
+            tempo_cond = tempo_vec[:, :, None].expand(
+            -1,
+            -1,
+            noised_latents.shape[-1],
+            )
 
         with torch.cuda.amp.autocast():
-            v = self.diffusion(noised_latents, t)
-            mse_loss = F.mse_loss(v, targets)
+            v = self.diffusion(
+            noised_latents,
+            t,
+            cond=tempo_cond,
+            )
+
+            mse_loss = F.mse_loss(
+            v,
+            targets,
+            )
+
             loss = mse_loss
 
         log_dict = {
-            'train/loss': loss.detach(),
-            'train/mse_loss': mse_loss.detach(),
+        "train/loss": loss.detach(),
+        "train/mse_loss": mse_loss.detach(),
         }
 
-        self.log_dict(log_dict, prog_bar=True, on_step=True)
+        self.log_dict(
+        log_dict,
+        prog_bar=True,
+        on_step=True,
+        )
+
         return loss
 
     def on_before_zero_grad(self, *args, **kwargs):
@@ -241,14 +313,47 @@ class DemoCallback(pl.Callback):
         ],
         device=module.device,
         )
-
+        
         try:
         # Sample in latent space
+            target_bpm = getattr(
+            module.global_args,
+            "demo_bpm",
+            90.0,
+            )
+
+            tempo_cond = None
+
+            if getattr(module.global_args, "use_tempo_conditioning", False):
+                tempo_vec = make_tempo_condition(
+                target_bpm,
+                min_bpm=module.global_args.min_bpm,
+                max_bpm=module.global_args.max_bpm,
+            )
+
+            tempo_vec = torch.tensor(
+            tempo_vec,
+            dtype=torch.float32,
+            device=module.device,
+            )
+
+            tempo_vec = tempo_vec[None, :].repeat(
+            self.num_demos,
+            1,
+            )
+
+            tempo_cond = tempo_vec[:, :, None].expand(
+            -1,
+            -1,
+            latent_samples,
+            )
             latent_fakes = sample(
-                module.diffusion_ema,
-                noise,
-                self.demo_steps,
-                0
+            module.diffusion_ema,
+            noise,
+            self.demo_steps,
+            0,
+            cond=tempo_cond,
+            guidance_scale=1.0,
             )
 
         # Decode latent audio back to waveform
@@ -288,7 +393,10 @@ def main():
 
     args = get_all_args()
 
-    args.latent_dim = 0
+    if getattr(args, "use_tempo_conditioning", False):
+        args.latent_dim = 1
+    else:
+        args.latent_dim = 0
 
     save_path = None if args.save_path == "" else args.save_path
 
