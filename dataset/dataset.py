@@ -42,10 +42,14 @@ class SampleDataset(torch.utils.data.Dataset):
         self.num_gpus = global_args.num_gpus
         self.cache_training_data = global_args.cache_training_data
 
-        self.use_tempo_conditioning = getattr(
-            global_args,
-            "use_tempo_conditioning",
-            False,
+        # self.use_tempo_conditioning = getattr(
+        #     global_args,
+        #     "use_tempo_conditioning",
+        #     False,
+        # )
+        self.use_tempo_conditioning = (
+            getattr(global_args, "use_tempo_conditioning", False)
+            or getattr(global_args, "latent_dim", 0) > 0
         )
 
         self.min_bpm = getattr(

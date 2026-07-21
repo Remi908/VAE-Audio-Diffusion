@@ -190,10 +190,32 @@ class DiffusionUncond(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         reals = batch[0]
 
-        tempo_vec = None
+        # tempo_vec = None
 
-        if getattr(self.global_args, "use_tempo_conditioning", False):
-            tempo_vec = batch[1].to(self.device)  # [B, 1]
+        # # If tempo conditioning is enabled, batch must contain:
+        # # batch[0] = audio
+        # # batch[1] = tempo condition, shape [B, 1]
+        # if getattr(self.global_args, "use_tempo_conditioning", False):
+        #     if len(batch) < 3:
+        #         raise RuntimeError(
+        #             "Tempo conditioning is enabled, but dataset did not return "
+        #             "(audio, tempo_cond, audio_filename). Check dataset.py."
+        #         )
+
+        #     tempo_vec = batch[1].to(self.device)
+        tempo_vec = None
+        tempo_cond = None
+        tempo_enabled = getattr(self.global_args, "latent_dim", 0) > 0
+
+        if tempo_enabled:
+            if len(batch) < 3:
+                raise RuntimeError(
+                    "Tempo conditioning is enabled because latent_dim > 0, "
+                    "but dataset did not return (audio, tempo_cond, audio_filename). "
+                    "Check dataset.py and defaults.ini."
+                )
+
+            tempo_vec = batch[1].to(self.device)
 
         with torch.no_grad():
             mu, logvar = self.vae.encode(reals)
@@ -209,24 +231,15 @@ class DiffusionUncond(pl.LightningModule):
 
         noise = torch.randn_like(latents)
 
-        noised_latents = (
-        latents * alphas
-        + noise * sigmas
-       )
+        noised_latents = latents * alphas + noise * sigmas
 
-        targets = (
-        noise * alphas
-        - latents * sigmas
-        )
+        targets = noise * alphas - latents * sigmas
 
         tempo_cond = None
 
         if tempo_vec is not None:
-            drop_prob = getattr(
-            self.global_args,
-            "cond_drop_prob",
-            0.1,
-        )
+            # Optional classifier-free guidance dropout
+            drop_prob = getattr(self.global_args, "cond_drop_prob", 0.1)
 
             if drop_prob > 0:
                 keep_mask = (
@@ -234,41 +247,43 @@ class DiffusionUncond(pl.LightningModule):
                         tempo_vec.shape[0],
                         1,
                         device=self.device,
-                )
+                    )
                     > drop_prob
-                    ).float()
+                ).float()
 
                 tempo_vec = tempo_vec * keep_mask
 
+            # [B, 1] -> [B, 1, latent_time]
             tempo_cond = tempo_vec[:, :, None].expand(
-            -1,
-            -1,
-            noised_latents.shape[-1],
+                -1,
+                -1,
+                noised_latents.shape[-1],
+            )
+
+        # Safety check
+        if getattr(self.global_args, "latent_dim", 0) > 0 and tempo_cond is None:
+            raise RuntimeError(
+                "Model was created with latent_dim > 0, but tempo_cond is None. "
+                "The UNet expects tempo conditioning but did not receive it."
             )
 
         with torch.cuda.amp.autocast():
             v = self.diffusion(
-            noised_latents,
-            t,
-            cond=tempo_cond,
+                noised_latents,
+                t,
+                cond=tempo_cond,
             )
 
-            mse_loss = F.mse_loss(
-            v,
-            targets,
-            )
-
+            mse_loss = F.mse_loss(v, targets)
             loss = mse_loss
 
-        log_dict = {
-        "train/loss": loss.detach(),
-        "train/mse_loss": mse_loss.detach(),
-        }
-
         self.log_dict(
-        log_dict,
-        prog_bar=True,
-        on_step=True,
+            {
+                "train/loss": loss.detach(),
+                "train/mse_loss": mse_loss.detach(),
+            },
+            prog_bar=True,
+            on_step=True,
         )
 
         return loss
@@ -393,10 +408,10 @@ def main():
 
     args = get_all_args()
 
-    if getattr(args, "use_tempo_conditioning", False):
-        args.latent_dim = 1
-    else:
-        args.latent_dim = 0
+    # if getattr(args, "use_tempo_conditioning", False):
+    args.latent_dim = 1
+    # else:
+    #     args.latent_dim = 0
 
     save_path = None if args.save_path == "" else args.save_path
 
