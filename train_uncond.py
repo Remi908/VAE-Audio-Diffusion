@@ -339,29 +339,32 @@ class DemoCallback(pl.Callback):
 
             tempo_cond = None
 
-            if getattr(module.global_args, "use_tempo_conditioning", False):
+            tempo_enabled = getattr(module.global_args, "latent_dim", 0) > 0
+
+            if tempo_enabled:
                 tempo_vec = make_tempo_condition(
                 target_bpm,
                 min_bpm=module.global_args.min_bpm,
                 max_bpm=module.global_args.max_bpm,
             )
 
-            tempo_vec = torch.tensor(
-            tempo_vec,
-            dtype=torch.float32,
-            device=module.device,
-            )
+                tempo_vec = torch.tensor(
+                tempo_vec,
+                dtype=torch.float32,
+                device=module.device,
+                )
 
-            tempo_vec = tempo_vec[None, :].repeat(
-            self.num_demos,
-            1,
-            )
+                tempo_vec = tempo_vec[None, :].repeat(
+                self.num_demos,
+                1,
+                )
 
-            tempo_cond = tempo_vec[:, :, None].expand(
-            -1,
-            -1,
-            latent_samples,
-            )
+                tempo_cond = tempo_vec[:, :, None].expand(
+                -1,
+                -1,
+                latent_samples,
+                )
+            
             latent_fakes = sample(
             module.diffusion_ema,
             noise,
